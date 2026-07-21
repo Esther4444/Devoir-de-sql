@@ -1,0 +1,141 @@
+-- ============================================================
+-- GROUPE 1 — MODULE 9 : INDEXATION ET OPTIMISATION
+-- Protocole complet AVANT / APRES, reproductible devant le jury.
+--
+-- POINT CLE A EXPLIQUER : Sakila livre DEJA des index sur rental
+-- (idx_fk_customer_id, idx_fk_inventory_id) car MySQL exige un
+-- index pour chaque cle etrangere. Pour mesurer honnetement
+-- l'AVANT, on retire d'abord ces index (donc les FK qui s'y
+-- appuient), on mesure, on cree NOS index, on remet les FK.
+-- ============================================================
+USE sakila;
+
+-- ------------------------------------------------------------
+-- ETAPE 0 : preparation de l'etat "SANS INDEX"
+-- ------------------------------------------------------------
+-- (si 01_installation.sql a deja cree l'index composite, on le
+--  retire aussi ; ignorer l'erreur s'il n'existe pas)
+ALTER TABLE rental DROP INDEX idx_loc_inventaire_retour;
+
+ALTER TABLE rental DROP FOREIGN KEY fk_rental_customer;
+ALTER TABLE rental DROP INDEX idx_fk_customer_id;
+ALTER TABLE rental DROP FOREIGN KEY fk_rental_inventory;
+ALTER TABLE rental DROP INDEX idx_fk_inventory_id;
+
+-- Activer le chronometrage (MariaDB/MySQL) :
+SET profiling = 1;
+
+-- ============================================================
+-- MESURES "AVANT" — executer chaque requete 3 fois et retenir
+-- la moyenne (SHOW PROFILES en fin de bloc)
+-- ============================================================
+
+-- ---------- Requete R1 : toutes les locations d'un client ----
+EXPLAIN SELECT * FROM rental WHERE customer_id = 148;
+-- Lire dans le plan : type = ALL, rows ~ 16044
+-- => la base PARCOURT TOUTE LA TABLE (full scan) car aucun index
+--    ne permet d'acceder directement aux lignes du client.
+SELECT SQL_NO_CACHE * FROM rental WHERE customer_id = 148;
+SELECT SQL_NO_CACHE * FROM rental WHERE customer_id = 148;
+SELECT SQL_NO_CACHE * FROM rental WHERE customer_id = 148;
+
+-- ---------- Requete R2 : cet exemplaire est-il sorti ? --------
+-- (la question centrale du theme : trigger, procedure, vue)
+EXPLAIN SELECT * FROM rental
+WHERE inventory_id = 367 AND return_date IS NULL;
+-- type = ALL egalement : full scan.
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 367 AND return_date IS NULL;
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 367 AND return_date IS NULL;
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 367 AND return_date IS NULL;
+
+-- ---------- Requete R3 : locations non rendues (jointure) -----
+EXPLAIN SELECT c.last_name, f.title, r.rental_date
+FROM rental r
+JOIN customer c  ON c.customer_id  = r.customer_id
+JOIN inventory i ON i.inventory_id = r.inventory_id
+JOIN film f      ON f.film_id      = i.film_id
+WHERE r.return_date IS NULL AND r.customer_id = 148;
+SELECT SQL_NO_CACHE c.last_name, f.title, r.rental_date
+FROM rental r
+JOIN customer c  ON c.customer_id  = r.customer_id
+JOIN inventory i ON i.inventory_id = r.inventory_id
+JOIN film f      ON f.film_id      = i.film_id
+WHERE r.return_date IS NULL AND r.customer_id = 148;
+
+-- ---------- Requete R4 : historique d'un exemplaire -----------
+EXPLAIN SELECT * FROM rental WHERE inventory_id = 100 ORDER BY rental_date;
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 100 ORDER BY rental_date;
+
+-- >>> RELEVER LES TEMPS "AVANT" :
+SHOW PROFILES;
+
+-- ============================================================
+-- ETAPE 2 : CREATION DES INDEX ADAPTES
+-- ============================================================
+-- Index simple : colonne du WHERE de R1
+CREATE INDEX idx_rental_customer ON rental (customer_id);
+
+-- Index COMPOSITE : couvre R2 et R4 (prefixe inventory_id) et
+-- accelere le filtre return_date IS NULL. L'ordre des colonnes
+-- compte : la colonne d'egalite d'abord, le filtre ensuite.
+CREATE INDEX idx_loc_inventaire_retour ON rental (inventory_id, return_date);
+
+-- Remettre les cles etrangeres d'origine (elles reutilisent nos
+-- nouveaux index : pas d'index en double) :
+ALTER TABLE rental ADD CONSTRAINT fk_rental_customer
+  FOREIGN KEY (customer_id) REFERENCES customer (customer_id)
+  ON DELETE RESTRICT ON UPDATE CASCADE;
+ALTER TABLE rental ADD CONSTRAINT fk_rental_inventory
+  FOREIGN KEY (inventory_id) REFERENCES inventory (inventory_id)
+  ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- ============================================================
+-- MESURES "APRES" — memes requetes, memes conditions
+-- ============================================================
+EXPLAIN SELECT * FROM rental WHERE customer_id = 148;
+-- Lire : type = ref, key = idx_rental_customer, rows ~ 46
+-- => ACCES DIRECT par l'index au lieu du parcours complet.
+SELECT SQL_NO_CACHE * FROM rental WHERE customer_id = 148;
+SELECT SQL_NO_CACHE * FROM rental WHERE customer_id = 148;
+SELECT SQL_NO_CACHE * FROM rental WHERE customer_id = 148;
+
+EXPLAIN SELECT * FROM rental
+WHERE inventory_id = 367 AND return_date IS NULL;
+-- type = ref, key = idx_loc_inventaire_retour, rows ~ 1
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 367 AND return_date IS NULL;
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 367 AND return_date IS NULL;
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 367 AND return_date IS NULL;
+
+EXPLAIN SELECT c.last_name, f.title, r.rental_date
+FROM rental r
+JOIN customer c  ON c.customer_id  = r.customer_id
+JOIN inventory i ON i.inventory_id = r.inventory_id
+JOIN film f      ON f.film_id      = i.film_id
+WHERE r.return_date IS NULL AND r.customer_id = 148;
+SELECT SQL_NO_CACHE c.last_name, f.title, r.rental_date
+FROM rental r
+JOIN customer c  ON c.customer_id  = r.customer_id
+JOIN inventory i ON i.inventory_id = r.inventory_id
+JOIN film f      ON f.film_id      = i.film_id
+WHERE r.return_date IS NULL AND r.customer_id = 148;
+
+EXPLAIN SELECT * FROM rental WHERE inventory_id = 100 ORDER BY rental_date;
+SELECT SQL_NO_CACHE * FROM rental WHERE inventory_id = 100 ORDER BY rental_date;
+
+-- >>> RELEVER LES TEMPS "APRES" :
+SHOW PROFILES;
+
+-- ============================================================
+-- TABLEAU COMPARATIF A REMPLIR (a recopier dans le dossier)
+-- ============================================================
+-- | Requete | Temps avant (ms) | Plan avant | Temps apres (ms) | Plan apres              | Gain    |
+-- |---------|------------------|------------|------------------|--------------------------|---------|
+-- | R1      |       ...        | ALL (scan) |       ...        | ref idx_rental_customer  |  x ...  |
+-- | R2      |       ...        | ALL (scan) |       ...        | ref idx_loc_inv_retour   |  x ...  |
+-- | R3      |       ...        | ALL sur r  |       ...        | ref (jointures indexees) |  x ...  |
+-- | R4      |       ...        | ALL (scan) |       ...        | ref idx_loc_inv_retour   |  x ...  |
+--
+-- NB : sur 16 044 lignes les temps sont en millisecondes ; c'est
+-- le PLAN (ALL -> ref) et le nombre de lignes examinees
+-- (16044 -> ~46 ou ~1) qui prouvent le gain, et qui montrent que
+-- sur des millions de lignes l'ecart deviendrait enorme.
